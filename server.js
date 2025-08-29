@@ -59,8 +59,8 @@ async function executeClaudeCode(instruction, projectPath, options = {}) {
     let command = `cd ${projectPath} && `;
     
     // Configurar git se necessário
-    command += `git config --global user.email "railway@claude-webhook.com" && `;
-    command += `git config --global user.name "Claude Railway Bot" && `;
+    command += `git config --global user.email "emingues@gmail.com" && `;
+    command += `git config --global user.name "Bot" && `;
     
     // Fetch latest changes
     command += `git fetch origin && `;
