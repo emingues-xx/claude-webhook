@@ -30,7 +30,6 @@ app.get('/health', (req, res) => {
 // Função para clonar repositório se necessário
 async function ensureRepository(repoUrl, projectPath) {
   try {
-    console.log(`ensureRepository: ${repoUrl}`);
     await fs.access(projectPath);
     console.log(`Repository exists at ${projectPath}`);
   } catch {
