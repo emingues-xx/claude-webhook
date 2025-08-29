@@ -24,8 +24,8 @@ RUN curl -fsSL https://github.com/cli/cli/releases/download/v2.40.1/gh_2.40.1_li
 COPY . .
 
 # Configurar Git
-RUN git config --global user.name "Claude Railway Bot" && \
-    git config --global user.email "railway@claude-webhook.com"
+RUN git config --global user.name "Bot Railway" && \
+    git config --global user.email "emingues@gmail.com"
 
 # Criar diretórios necessários
 RUN mkdir -p /tmp/projects /app/logs
