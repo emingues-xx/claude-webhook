@@ -167,7 +167,7 @@ async function executeClaudeCode(instruction, projectPath, options = {}) {
     // 1. Configurar Git
     commands.push({
       name: 'git_config',
-      cmd: `cd "${projectPath}" && git config user.email "emingues@gmail.com" && git config user.name "Bot"`,
+      cmd: `cd "${projectPath}" && git config user.email "railway@claude-webhook.com" && git config user.name "Claude Railway Bot"`,
       timeout: 10000
     });
     
@@ -186,18 +186,18 @@ async function executeClaudeCode(instruction, projectPath, options = {}) {
         timeout: 15000
       });
     }
-
+    
+    // 4. Executar Claude Code com diagnóstico melhorado
     commands.push({
       name: 'claude_test',
       cmd: `${claudeCommand} --version`,
       timeout: 15000
     });
-    
-    // 4. Executar Claude Code
+
     commands.push({
       name: 'claude_code',
-      cmd: `cd "${projectPath}" && ${claudeCommand} "${instruction}"`,
-      timeout: 240000 // 4 minutos para Claude Code
+      cmd: `cd "${projectPath}" && timeout 180s ${claudeCommand} "${instruction}"`,
+      timeout: 200000 // 3.3 minutos (um pouco mais que o timeout interno)
     });
 
     // Executar comandos sequencialmente
@@ -213,7 +213,10 @@ async function executeClaudeCode(instruction, projectPath, options = {}) {
             env: {
               ...process.env,
               ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
-              PATH: '/usr/local/bin:/usr/bin:/bin'
+              PATH: '/usr/local/bin:/usr/bin:/bin',
+              // Debug adicional
+              DEBUG: '1',
+              ANTHROPIC_DEBUG: '1'
             }
           }, (error, stdout, stderr) => {
             if (error) {
@@ -266,15 +269,27 @@ async function executeClaudeCode(instruction, projectPath, options = {}) {
     }
     
     // Sucesso se chegou até aqui
-    const claudeResult = results.find(r => r.command === 'claude_code');
+    const claudeResult = results.find(r => r.command === 'claude_code' && r.success) || 
+                        results.find(r => r.command === 'claude_fallback' && r.success);
+    
+    if (!claudeResult || !claudeResult.success) {
+      reject({
+        success: false,
+        error: 'Nenhum método de execução do Claude Code funcionou',
+        results: results,
+        suggestion: 'Problema grave com conectividade da API ou configuração'
+      });
+      return;
+    }
     
     resolve({
       success: true,
-      stdout: claudeResult?.stdout || '',
-      stderr: claudeResult?.stderr || '',
+      stdout: claudeResult.stdout || '',
+      stderr: claudeResult.stderr || '',
       branch: branch,
       projectPath: projectPath,
       claudeCommand: claudeCommand,
+      method_used: claudeResult.command,
       allResults: results
     });
   });
