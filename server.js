@@ -55,6 +55,27 @@ async function executeClaudeCode(instruction, projectPath, options = {}) {
       createPR = false
     } = options;
 
+    // Verificar se Claude Code está disponível
+    try {
+      await new Promise((resolve, reject) => {
+        exec('which claude-code', (error, stdout, stderr) => {
+          if (error) {
+            reject(new Error('Claude Code não encontrado. Instalação pode ter falhado.'));
+          } else {
+            console.log('Claude Code encontrado em:', stdout.trim());
+            resolve(stdout);
+          }
+        });
+      });
+    } catch (error) {
+      reject({
+        success: false,
+        error: 'Claude Code não está disponível no container: ' + error.message,
+        suggestion: 'Verifique a instalação no Dockerfile'
+      });
+      return;
+    }
+
     // Comando otimizado para Railway
     let command = `cd ${projectPath} && `;
     
