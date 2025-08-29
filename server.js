@@ -260,48 +260,79 @@ app.get('/debug', async (req, res) => {
     }
   };
 
-  // Verificar Claude Code
-  try {
-    const claudeCodePath = await new Promise((resolve, reject) => {
-      exec('which claude-code', (error, stdout) => {
-        if (error) reject(error);
-        else resolve(stdout.trim());
+  // Verificar Claude Code - MELHORADO para detectar ambos os comandos
+  const claudeCommands = ['claude-code', 'claude'];
+  let claudeFound = false;
+  
+  for (const cmd of claudeCommands) {
+    try {
+      const claudePath = await new Promise((resolve, reject) => {
+        exec(`which ${cmd}`, (error, stdout) => {
+          if (error) reject(error);
+          else resolve(stdout.trim());
+        });
       });
-    });
-    
-    const claudeCodeVersion = await new Promise((resolve, reject) => {
-      exec('claude-code --version', { timeout: 10000 }, (error, stdout) => {
-        if (error) reject(error);
-        else resolve(stdout.trim());
+      
+      const claudeVersion = await new Promise((resolve, reject) => {
+        exec(`${cmd} --version`, { timeout: 10000 }, (error, stdout) => {
+          if (error) reject(error);
+          else resolve(stdout.trim());
+        });
       });
-    });
-    
-    diagnostics.installations.claude_code = {
-      status: 'installed',
-      path: claudeCodePath,
-      version: claudeCodeVersion
-    };
-  } catch (error) {
-    diagnostics.installations.claude_code = {
-      status: 'not_found',
-      error: error.message
-    };
-    
-    // Tentar encontrar em outros locais
+      
+      diagnostics.installations[`claude_${cmd.replace('-', '_')}`] = {
+        status: 'installed',
+        path: claudePath,
+        version: claudeVersion,
+        command: cmd
+      };
+      
+      claudeFound = true;
+      
+      // Se encontrou, marcar como preferido
+      if (!diagnostics.installations.claude_preferred) {
+        diagnostics.installations.claude_preferred = {
+          command: cmd,
+          path: claudePath,
+          version: claudeVersion
+        };
+      }
+      
+    } catch (error) {
+      diagnostics.installations[`claude_${cmd.replace('-', '_')}`] = {
+        status: 'not_found',
+        error: error.message,
+        command: cmd
+      };
+    }
+  }
+  
+  // Se nenhum comando foi encontrado, procurar em locais alternativos
+  if (!claudeFound) {
     const possiblePaths = [
-      '/usr/local/bin/claude-code',
-      '/usr/bin/claude-code',
+      '/usr/local/lib/node_modules/@anthropic-ai/claude-code/bin/claude-code',
+      '/usr/local/lib/node_modules/@anthropic-ai/claude-code/bin/claude',
       '/app/node_modules/.bin/claude-code',
-      '/usr/local/lib/node_modules/@anthropic-ai/claude-code/bin/claude-code'
+      '/app/node_modules/.bin/claude',
+      '/usr/local/bin/claude'
     ];
+    
+    diagnostics.installations.claude_alternative_search = [];
     
     for (const path of possiblePaths) {
       try {
         require('fs').accessSync(path);
-        diagnostics.installations.claude_code.alternative_path = path;
-        break;
+        diagnostics.installations.claude_alternative_search.push({
+          path: path,
+          exists: true,
+          executable: require('fs').constants.X_OK
+        });
       } catch (e) {
-        // Continue procurando
+        diagnostics.installations.claude_alternative_search.push({
+          path: path,
+          exists: false,
+          error: e.code
+        });
       }
     }
   }
@@ -420,18 +451,35 @@ app.get('/debug', async (req, res) => {
       diagnostics.file_system.usr_local_bin_error = e.message;
     }
     
+    // Verificar /usr/local/lib/node_modules/@anthropic-ai/claude-code/
+    try {
+      const claudeModulePath = '/usr/local/lib/node_modules/@anthropic-ai/claude-code/bin';
+      if (fs.existsSync(claudeModulePath)) {
+        const claudeBinContents = fs.readdirSync(claudeModulePath);
+        diagnostics.file_system.claude_module_bin = claudeBinContents;
+      }
+    } catch (e) {
+      diagnostics.file_system.claude_module_error = e.message;
+    }
+    
   } catch (error) {
     diagnostics.file_system.error = error.message;
   }
 
-  // Adicionar recomendações baseadas nos resultados
+  // Adicionar recomendações baseadas nos resultados - MELHORADO
   diagnostics.recommendations = [];
   
-  if (diagnostics.installations.claude_code.status !== 'installed') {
+  if (!claudeFound && !diagnostics.installations.claude_preferred) {
     diagnostics.recommendations.push({
-      type: 'warning',
-      message: 'Claude Code não está instalado ou não está no PATH',
-      action: 'Verificar instalação no Dockerfile ou tentar instalação dinâmica'
+      type: 'error',
+      message: 'Claude Code não está disponível em nenhum comando (claude-code ou claude)',
+      action: 'Execute POST /fix-claude para tentar corrigir automaticamente'
+    });
+  } else if (claudeFound) {
+    diagnostics.recommendations.push({
+      type: 'success',
+      message: `Claude Code disponível como: ${diagnostics.installations.claude_preferred?.command}`,
+      action: 'Pronto para uso!'
     });
   }
   
@@ -440,6 +488,12 @@ app.get('/debug', async (req, res) => {
       type: 'error',
       message: 'ANTHROPIC_API_KEY não configurada',
       action: 'Configurar a variável de ambiente ANTHROPIC_API_KEY no Railway'
+    });
+  } else if (diagnostics.environment.env_vars.anthropic_key_length < 100) {
+    diagnostics.recommendations.push({
+      type: 'warning',
+      message: 'ANTHROPIC_API_KEY parece ser muito curta',
+      action: 'Verificar se a API key está completa'
     });
   }
   
@@ -451,13 +505,37 @@ app.get('/debug', async (req, res) => {
     });
   }
   
-  if (diagnostics.installations.github_cli.status !== 'installed') {
+  if (diagnostics.installations.github_cli?.status === 'installed') {
+    const authStatus = diagnostics.installations.github_cli.auth_status;
+    if (authStatus.includes('Missing required token scopes')) {
+      diagnostics.recommendations.push({
+        type: 'warning',
+        message: 'GitHub token não tem todos os scopes necessários',
+        action: 'Execute: gh auth refresh -h github.com para adicionar scopes'
+      });
+    } else if (authStatus.includes('Logged in')) {
+      diagnostics.recommendations.push({
+        type: 'success',
+        message: 'GitHub CLI configurado e autenticado',
+        action: 'PRs automáticos funcionarão'
+      });
+    }
+  } else {
     diagnostics.recommendations.push({
       type: 'info',
       message: 'GitHub CLI não disponível',
       action: 'PRs automáticos não funcionarão sem GitHub CLI'
     });
   }
+
+  // Status geral
+  diagnostics.overall_status = {
+    claude_ready: claudeFound,
+    api_key_configured: !!process.env.ANTHROPIC_API_KEY,
+    git_configured: diagnostics.installations.git?.status === 'installed',
+    webhook_ready: claudeFound && !!process.env.ANTHROPIC_API_KEY,
+    pr_ready: diagnostics.installations.github_cli?.status === 'installed' && !!process.env.GITHUB_TOKEN
+  };
 
   res.json(diagnostics);
 });
