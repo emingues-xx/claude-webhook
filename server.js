@@ -46,21 +46,110 @@ async function ensureRepository(repoUrl, projectPath) {
   }
 }
 
+// Função para instalar Claude Code se necessário
+async function ensureClaudeCode() {
+  return new Promise((resolve, reject) => {
+    // Primeiro, verificar se existe como 'claude-code'
+    exec('which claude-code', (error1, stdout1) => {
+      if (!error1) {
+        console.log('✅ claude-code já disponível em:', stdout1.trim());
+        resolve('claude-code');
+        return;
+      }
+      
+      // Verificar se existe como 'claude' (nome alternativo)
+      exec('which claude', (error2, stdout2) => {
+        if (!error2) {
+          console.log('✅ claude disponível em:', stdout2.trim());
+          console.log('💡 Usando "claude" em vez de "claude-code"');
+          resolve('claude');
+          return;
+        }
+        
+        // Verificar se existe no node_modules global
+        const possiblePaths = [
+          '/usr/local/lib/node_modules/@anthropic-ai/claude-code/bin/claude-code',
+          '/usr/local/lib/node_modules/@anthropic-ai/claude-code/bin/claude',
+          '/app/node_modules/.bin/claude-code',
+          '/app/node_modules/.bin/claude'
+        ];
+        
+        for (const path of possiblePaths) {
+          try {
+            require('fs').accessSync(path);
+            console.log('✅ Claude encontrado em:', path);
+            // Criar symlink
+            exec(`ln -sf ${path} /usr/local/bin/claude-code`, (linkError) => {
+              if (linkError) {
+                console.warn('⚠️ Não foi possível criar symlink, mas executável encontrado');
+              }
+              resolve('claude-code');
+            });
+            return;
+          } catch (e) {
+            // Continue procurando
+          }
+        }
+        
+        console.log('📦 Claude Code não encontrado. Tentando reinstalar...');
+        
+        // Tentar instalar
+        exec('npm install -g @anthropic-ai/claude-code --unsafe-perm=true --allow-root', {
+          timeout: 60000 // 1 minuto timeout
+        }, (installError, installStdout, installStderr) => {
+          if (installError) {
+            console.error('❌ Erro ao reinstalar Claude Code:', installError.message);
+            console.error('stderr:', installStderr);
+            reject(installError);
+            return;
+          }
+          
+          console.log('✅ Claude Code reinstalado');
+          
+          // Verificar se funciona agora
+          exec('which claude-code || which claude', (finalError, finalStdout) => {
+            if (finalError) {
+              reject(new Error('Claude Code instalado mas ainda não encontrado no PATH'));
+            } else {
+              const command = finalStdout.trim().includes('claude-code') ? 'claude-code' : 'claude';
+              console.log('✅ Claude disponível como:', command);
+              resolve(command);
+            }
+          });
+        });
+      });
+    });
+  });
+}
+
 // Função principal para executar Claude Code
 async function executeClaudeCode(instruction, projectPath, options = {}) {
-  return new Promise((resolve, reject) => {
+  return new Promise(async (resolve, reject) => {
     const {
       branch = 'feat/generate-automatic',
       createBranch = true,
       createPR = false
     } = options;
 
+    // Garantir que Claude Code está disponível e descobrir o comando correto
+    let claudeCommand;
+    try {
+      claudeCommand = await ensureClaudeCode();
+    } catch (error) {
+      reject({
+        success: false,
+        error: 'Falha ao garantir que Claude Code está disponível: ' + error.message,
+        suggestion: 'Problema na instalação do Claude Code no container'
+      });
+      return;
+    }
+
     // Comando otimizado para Railway
-    let command = `cd ${projectPath} && `;
+    let command = `cd "${projectPath}" && `;
     
     // Configurar git se necessário
-    command += `git config --global user.email "emingues@gmail.com" && `;
-    command += `git config --global user.name "Bot" && `;
+    command += `git config --global user.email "railway@claude-webhook.com" && `;
+    command += `git config --global user.name "Claude Railway Bot" && `;
     
     // Fetch latest changes
     command += `git fetch origin && `;
@@ -70,8 +159,8 @@ async function executeClaudeCode(instruction, projectPath, options = {}) {
       command += `(git checkout -b ${branch} origin/main 2>/dev/null || git checkout ${branch}) && `;
     }
     
-    // Executar Claude Code
-    command += `claude-code "${instruction}"`;
+    // Executar Claude Code com o comando correto descoberto
+    command += `PATH="/usr/local/bin:$PATH" ${claudeCommand} "${instruction}"`;
     
     console.log('Executando comando:', command.replace(process.env.ANTHROPIC_API_KEY || '', '***'));
     
@@ -80,7 +169,8 @@ async function executeClaudeCode(instruction, projectPath, options = {}) {
       timeout: 300000,
       env: {
         ...process.env,
-        ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY
+        ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
+        PATH: '/usr/local/bin:/usr/bin:/bin'
       }
     }, (error, stdout, stderr) => {
       if (error) {
@@ -88,7 +178,13 @@ async function executeClaudeCode(instruction, projectPath, options = {}) {
         reject({
           success: false,
           error: error.message,
-          stderr: stderr
+          stderr: stderr,
+          debug: {
+            command: command.replace(process.env.ANTHROPIC_API_KEY || '', '***'),
+            cwd: projectPath,
+            claudeCommand: claudeCommand,
+            env: Object.keys(process.env).filter(key => key.includes('ANTHROPIC') || key.includes('PATH'))
+          }
         });
         return;
       }
@@ -98,7 +194,8 @@ async function executeClaudeCode(instruction, projectPath, options = {}) {
         stdout: stdout,
         stderr: stderr,
         branch: branch,
-        projectPath: projectPath
+        projectPath: projectPath,
+        claudeCommand: claudeCommand
       });
     });
   });
