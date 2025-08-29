@@ -341,30 +341,6 @@ async function forceClaudeCodeCLI(instruction, projectPath, options = {}) {
       return;
     }
 
-    // ESTRATÉGIA 1: Timeout mais longo + variáveis de debug
-    console.log('🔧 Estratégia 1: Timeout longo + debug');
-    try {
-      const strategy1 = await executeWithStrategy1(claudeCommand, instruction, projectPath);
-      if (strategy1.success) {
-        console.log('✅ Estratégia 1 FUNCIONOU!');
-        return resolve(strategy1);
-      }
-    } catch (e1) {
-      console.log('❌ Estratégia 1 falhou:', e1.message);
-    }
-
-    // ESTRATÉGIA 2: Reiniciar processo + limpar cache
-    console.log('🔧 Estratégia 2: Reiniciar processo + limpar cache');
-    try {
-      const strategy2 = await executeWithStrategy2(claudeCommand, instruction, projectPath);
-      if (strategy2.success) {
-        console.log('✅ Estratégia 2 FUNCIONOU!');
-        return resolve(strategy2);
-      }
-    } catch (e2) {
-      console.log('❌ Estratégia 2 falhou:', e2.message);
-    }
-
     // ESTRATÉGIA 3: Instrução fragmentada
     console.log('🔧 Estratégia 3: Instrução fragmentada');
     try {
