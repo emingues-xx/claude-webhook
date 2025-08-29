@@ -418,6 +418,105 @@ app.post('/execute-claude', async (req, res) => {
   }
 });
 
+// Endpoint para testar conectividade com API Anthropic
+app.post('/test-api', async (req, res) => {
+  try {
+    if (!process.env.ANTHROPIC_API_KEY) {
+      return res.json({
+        success: false,
+        error: 'ANTHROPIC_API_KEY não configurada'
+      });
+    }
+
+    console.log('🧪 Testando conectividade com API Anthropic...');
+
+    // Teste direto com curl para API Anthropic
+    const apiTest = await new Promise((resolve) => {
+      const testCmd = `curl -s -w "HTTPSTATUS:%{http_code}" -X POST "https://api.anthropic.com/v1/messages" \
+        -H "Content-Type: application/json" \
+        -H "x-api-key: ${process.env.ANTHROPIC_API_KEY}" \
+        -H "anthropic-version: 2023-06-01" \
+        -d '{"model": "claude-3-haiku-20240307", "max_tokens": 10, "messages": [{"role": "user", "content": "hi"}]}' \
+        --connect-timeout 10 --max-time 30`;
+
+      exec(testCmd, (error, stdout, stderr) => {
+        if (error) {
+          resolve({
+            success: false,
+            error: error.message,
+            stderr: stderr
+          });
+        } else {
+          // Separar response do HTTP status
+          const parts = stdout.split('HTTPSTATUS:');
+          const response = parts[0];
+          const httpStatus = parts[1];
+
+          resolve({
+            success: true,
+            http_status: httpStatus,
+            response: response,
+            api_accessible: httpStatus === '200'
+          });
+        }
+      });
+    });
+
+    // Teste com Claude Code para ver logs detalhados
+    const claudeCommand = await ensureClaudeCode().catch(e => 'claude');
+    
+    const claudeTest = await new Promise((resolve) => {
+      const testDir = `/tmp/api-test-${Date.now()}`;
+      exec(`mkdir -p ${testDir}`, () => {
+        exec(`cd ${testDir} && timeout 45s ${claudeCommand} "create a simple hello.txt file" --verbose`, {
+          env: {
+            ...process.env,
+            ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
+            ANTHROPIC_DEBUG: '1',
+            DEBUG: '1'
+          }
+        }, (error, stdout, stderr) => {
+          // Cleanup
+          exec(`rm -rf ${testDir}`);
+          
+          resolve({
+            success: !error,
+            stdout: stdout || '',
+            stderr: stderr || '',
+            error: error ? error.message : null,
+            code: error ? error.code : null
+          });
+        });
+      });
+    });
+
+    res.json({
+      success: apiTest.api_accessible && claudeTest.success,
+      tests: {
+        direct_api: apiTest,
+        claude_code: claudeTest
+      },
+      api_key_info: {
+        configured: true,
+        length: process.env.ANTHROPIC_API_KEY.length,
+        prefix: process.env.ANTHROPIC_API_KEY.substring(0, 10) + '...'
+      },
+      recommendations: apiTest.api_accessible ? 
+        (claudeTest.success ? 
+          ['Tudo OK! API acessível e Claude Code funcionando'] :
+          ['API OK mas Claude Code com problema - verifique logs']
+        ) : 
+        ['API Anthropic inacessível - verifique API key ou conectividade']
+    });
+
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
 // Endpoint para verificar instalações e diagnóstico completo
 app.get('/debug', async (req, res) => {
   const diagnostics = {
