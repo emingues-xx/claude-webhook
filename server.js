@@ -227,6 +227,241 @@ app.post('/execute-claude', async (req, res) => {
   }
 });
 
+// Endpoint para verificar instalações e diagnóstico completo
+app.get('/debug', async (req, res) => {
+  const diagnostics = {
+    timestamp: new Date().toISOString(),
+    service: {
+      name: process.env.RAILWAY_SERVICE_NAME || 'local',
+      environment: process.env.RAILWAY_ENVIRONMENT || 'development',
+      uptime: process.uptime()
+    },
+    environment: {
+      node_version: process.version,
+      platform: process.platform,
+      arch: process.arch,
+      cwd: process.cwd(),
+      memory: process.memoryUsage(),
+      env_vars: {
+        has_anthropic_key: !!process.env.ANTHROPIC_API_KEY,
+        anthropic_key_length: process.env.ANTHROPIC_API_KEY ? process.env.ANTHROPIC_API_KEY.length : 0,
+        has_github_token: !!process.env.GITHUB_TOKEN,
+        github_token_length: process.env.GITHUB_TOKEN ? process.env.GITHUB_TOKEN.length : 0,
+        has_webhook_secret: !!process.env.WEBHOOK_SECRET,
+        path: process.env.PATH,
+        home: process.env.HOME
+      }
+    },
+    installations: {},
+    file_system: {
+      tmp_projects_exists: false,
+      app_logs_exists: false,
+      permissions: {}
+    }
+  };
+
+  // Verificar Claude Code
+  try {
+    const claudeCodePath = await new Promise((resolve, reject) => {
+      exec('which claude-code', (error, stdout) => {
+        if (error) reject(error);
+        else resolve(stdout.trim());
+      });
+    });
+    
+    const claudeCodeVersion = await new Promise((resolve, reject) => {
+      exec('claude-code --version', { timeout: 10000 }, (error, stdout) => {
+        if (error) reject(error);
+        else resolve(stdout.trim());
+      });
+    });
+    
+    diagnostics.installations.claude_code = {
+      status: 'installed',
+      path: claudeCodePath,
+      version: claudeCodeVersion
+    };
+  } catch (error) {
+    diagnostics.installations.claude_code = {
+      status: 'not_found',
+      error: error.message
+    };
+    
+    // Tentar encontrar em outros locais
+    const possiblePaths = [
+      '/usr/local/bin/claude-code',
+      '/usr/bin/claude-code',
+      '/app/node_modules/.bin/claude-code',
+      '/usr/local/lib/node_modules/@anthropic-ai/claude-code/bin/claude-code'
+    ];
+    
+    for (const path of possiblePaths) {
+      try {
+        require('fs').accessSync(path);
+        diagnostics.installations.claude_code.alternative_path = path;
+        break;
+      } catch (e) {
+        // Continue procurando
+      }
+    }
+  }
+
+  // Verificar Git
+  try {
+    const gitVersion = await new Promise((resolve, reject) => {
+      exec('git --version', (error, stdout) => {
+        if (error) reject(error);
+        else resolve(stdout.trim());
+      });
+    });
+    
+    const gitConfig = await new Promise((resolve, reject) => {
+      exec('git config --global --list', (error, stdout) => {
+        if (error) reject(error);
+        else resolve(stdout.trim());
+      });
+    });
+    
+    diagnostics.installations.git = {
+      status: 'installed',
+      version: gitVersion,
+      global_config: gitConfig.split('\n').filter(line => 
+        line.includes('user.name') || line.includes('user.email')
+      )
+    };
+  } catch (error) {
+    diagnostics.installations.git = {
+      status: 'not_found',
+      error: error.message
+    };
+  }
+
+  // Verificar GitHub CLI
+  try {
+    const ghVersion = await new Promise((resolve, reject) => {
+      exec('gh --version', (error, stdout) => {
+        if (error) reject(error);
+        else resolve(stdout.trim());
+      });
+    });
+    
+    // Verificar autenticação do GitHub
+    const ghAuth = await new Promise((resolve, reject) => {
+      exec('gh auth status', (error, stdout, stderr) => {
+        // gh auth status retorna info no stderr mesmo quando ok
+        resolve(stderr || stdout || 'No auth info');
+      });
+    });
+    
+    diagnostics.installations.github_cli = {
+      status: 'installed',
+      version: ghVersion,
+      auth_status: ghAuth
+    };
+  } catch (error) {
+    diagnostics.installations.github_cli = {
+      status: 'not_found',
+      error: error.message
+    };
+  }
+
+  // Verificar NPM global packages
+  try {
+    const npmList = await new Promise((resolve, reject) => {
+      exec('npm list -g --depth=0', (error, stdout) => {
+        if (error && !stdout) reject(error);
+        else resolve(stdout || '');
+      });
+    });
+    
+    diagnostics.installations.npm_global = {
+      status: 'checked',
+      packages: npmList.split('\n').filter(line => 
+        line.includes('@anthropic-ai/claude-code') || line.includes('claude-code')
+      )
+    };
+  } catch (error) {
+    diagnostics.installations.npm_global = {
+      status: 'error',
+      error: error.message
+    };
+  }
+
+  // Verificar sistema de arquivos
+  try {
+    const fs = require('fs');
+    
+    // Verificar diretórios importantes
+    diagnostics.file_system.tmp_projects_exists = fs.existsSync('/tmp/projects');
+    diagnostics.file_system.app_logs_exists = fs.existsSync('/app/logs');
+    
+    // Verificar permissões
+    try {
+      fs.accessSync('/tmp/projects', fs.constants.W_OK);
+      diagnostics.file_system.permissions.tmp_projects = 'writable';
+    } catch {
+      diagnostics.file_system.permissions.tmp_projects = 'not_writable';
+    }
+    
+    try {
+      fs.accessSync('/app', fs.constants.W_OK);
+      diagnostics.file_system.permissions.app_dir = 'writable';
+    } catch {
+      diagnostics.file_system.permissions.app_dir = 'not_writable';
+    }
+    
+    // Listar conteúdo de /usr/local/bin
+    try {
+      const binContents = fs.readdirSync('/usr/local/bin');
+      diagnostics.file_system.usr_local_bin = binContents.filter(file => 
+        file.includes('claude') || file.includes('node') || file.includes('npm')
+      );
+    } catch (e) {
+      diagnostics.file_system.usr_local_bin_error = e.message;
+    }
+    
+  } catch (error) {
+    diagnostics.file_system.error = error.message;
+  }
+
+  // Adicionar recomendações baseadas nos resultados
+  diagnostics.recommendations = [];
+  
+  if (diagnostics.installations.claude_code.status !== 'installed') {
+    diagnostics.recommendations.push({
+      type: 'warning',
+      message: 'Claude Code não está instalado ou não está no PATH',
+      action: 'Verificar instalação no Dockerfile ou tentar instalação dinâmica'
+    });
+  }
+  
+  if (!diagnostics.environment.env_vars.has_anthropic_key) {
+    diagnostics.recommendations.push({
+      type: 'error',
+      message: 'ANTHROPIC_API_KEY não configurada',
+      action: 'Configurar a variável de ambiente ANTHROPIC_API_KEY no Railway'
+    });
+  }
+  
+  if (!diagnostics.environment.env_vars.has_webhook_secret) {
+    diagnostics.recommendations.push({
+      type: 'warning',
+      message: 'WEBHOOK_SECRET não configurado',
+      action: 'Configurar WEBHOOK_SECRET para segurança'
+    });
+  }
+  
+  if (diagnostics.installations.github_cli.status !== 'installed') {
+    diagnostics.recommendations.push({
+      type: 'info',
+      message: 'GitHub CLI não disponível',
+      action: 'PRs automáticos não funcionarão sem GitHub CLI'
+    });
+  }
+
+  res.json(diagnostics);
+});
+
 // Endpoint para listar projetos ativos
 app.get('/projects', async (req, res) => {
   try {
