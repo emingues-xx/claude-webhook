@@ -29,16 +29,13 @@ COPY . .
 
 # Configurar Git
 RUN git config --global user.name "Bot" && \
-    git config --global user.email "emingues@claude-webhook.com"
+    git config --global user.email "emingues@gmail.com"
 
 # Criar diretórios necessários
 RUN mkdir -p /tmp/projects /app/logs
 
 # Adicionar /usr/local/bin ao PATH e verificar instalação
 ENV PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
-
-# Script de verificação na inicialização
-RUN echo '#!/bin/bash\necho "Verificando Claude Code..."\nwhich claude-code\nclaude-code --version\necho "Iniciando servidor..."\nexec node server.js' > start.sh && chmod +x start.sh
 
 # Expor porta
 EXPOSE 3000
@@ -47,5 +44,5 @@ EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
     CMD curl -f http://localhost:3000/health || exit 1
 
-# Iniciar aplicação com verificação
-CMD ["./start.sh"]
+# Iniciar aplicação diretamente (sem script externo)
+CMD ["node", "server.js"]
