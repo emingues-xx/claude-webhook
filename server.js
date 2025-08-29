@@ -30,6 +30,7 @@ app.get('/health', (req, res) => {
 // Função para clonar repositório se necessário
 async function ensureRepository(repoUrl, projectPath) {
   try {
+    console.log(`ensureRepository: ${repoUrl}`);
     await fs.access(projectPath);
     console.log(`Repository exists at ${projectPath}`);
   } catch {
@@ -332,6 +333,7 @@ app.post('/execute-claude', async (req, res) => {
 
     console.log(`Iniciando execução Claude Code para: ${instruction}`);
     console.log(`Projeto: ${projectPath}`);
+    console.log(`Repository: ${repoUrl}`);
 
     // Clonar repositório se fornecido
     if (repoUrl) {
