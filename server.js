@@ -186,6 +186,12 @@ async function executeClaudeCode(instruction, projectPath, options = {}) {
         timeout: 15000
       });
     }
+
+    commands.push({
+      name: 'claude_test',
+      cmd: `${claudeCommand} --version`,
+      timeout: 15000
+    });
     
     // 4. Executar Claude Code
     commands.push({
