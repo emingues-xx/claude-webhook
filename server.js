@@ -167,7 +167,7 @@ async function executeClaudeCode(instruction, projectPath, options = {}) {
     // 1. Configurar Git
     commands.push({
       name: 'git_config',
-      cmd: `cd "${projectPath}" && git config user.email "railway@claude-webhook.com" && git config user.name "Claude Railway Bot"`,
+      cmd: `cd "${projectPath}" && git config user.email "emingues@gmail.com" && git config user.name "Bot"`,
       timeout: 10000
     });
     
