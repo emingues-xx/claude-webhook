@@ -1,3 +1,4 @@
+require('dotenv').config();
 const express = require('express');
 const { exec } = require('child_process');
 const fs = require('fs').promises;
@@ -27,630 +28,406 @@ app.get('/health', (req, res) => {
   });
 });
 
-// Função para clonar repositório se necessário
 async function ensureRepository(repoUrl, projectPath) {
   try {
     await fs.access(projectPath);
-    console.log(`Repository exists at ${projectPath}`);
-  } catch {
-    console.log(`Cloning repository to ${projectPath}`);
-    return new Promise((resolve, reject) => {
-      exec(`git clone ${repoUrl} ${projectPath}`, (error, stdout, stderr) => {
+   
+    // Atualizar repositório existente
+    await new Promise((resolve, reject) => {
+      exec(`cd "${projectPath}" && git fetch origin && git pull origin main`, {
+        timeout: 30000
+      }, (error, stdout, stderr) => {
         if (error) {
-          reject(error);
+          console.warn('⚠️ Falha ao atualizar repositório:', error.message);
+        }
+        resolve(); // Continua mesmo se falhar
+      });
+    });
+    
+  } catch {
+    console.log(`📦 Clonando repositório: ${repoUrl}`);
+    
+    await new Promise((resolve, reject) => {
+      exec(`git clone ${repoUrl} ${projectPath}`, {
+        timeout: 60000
+      }, (error, stdout, stderr) => {
+        if (error) {
+          reject(new Error(`Falha ao clonar repositório: ${error.message}`));
         } else {
-          resolve(stdout);
+          resolve();
         }
       });
     });
   }
 }
 
-// Função para instalar Claude Code se necessário
-async function ensureClaudeCode() {
-  return new Promise((resolve, reject) => {
-    // Primeiro, verificar se existe como 'claude-code'
-    exec('which claude-code', (error1, stdout1) => {
-      if (!error1) {
-        console.log('✅ claude-code já disponível em:', stdout1.trim());
-        resolve('claude-code');
-        return;
-      }
+async function executeClaudeCode(instruction, projectPath) {
+  return new Promise(async (resolve, reject) => {
+    try { 
+      instruction = instruction.replace(/"/g, '\\"');    
+      let claudeCommand = 'claude';
+
+      // Criar diretório se não existir
+      await fs.mkdir(projectPath, { recursive: true });
+                 
+      const command = `cd "${projectPath}" && echo "2" | ${claudeCommand} --dangerously-skip-permissions "${instruction}"`;
       
-      // Verificar se existe como 'claude' (nome alternativo)
-      exec('which claude', (error2, stdout2) => {
-        if (!error2) {
-          console.log('✅ claude disponível em:', stdout2.trim());
-          console.log('💡 Usando "claude" em vez de "claude-code"');
-          resolve('claude');
-          return;
-        }
+      const startTime = Date.now();
+      
+      // Executar comando diretamente
+      const result = await new Promise((resolve, reject) => {
+        const { spawn } = require('child_process');
         
-        // Verificar se existe no node_modules global
-        const possiblePaths = [
-          '/usr/local/lib/node_modules/@anthropic-ai/claude-code/bin/claude-code',
-          '/usr/local/lib/node_modules/@anthropic-ai/claude-code/bin/claude',
-          '/app/node_modules/.bin/claude-code',
-          '/app/node_modules/.bin/claude'
-        ];
-        
-        for (const path of possiblePaths) {
-          try {
-            require('fs').accessSync(path);
-            console.log('✅ Claude encontrado em:', path);
-            // Criar symlink
-            exec(`ln -sf ${path} /usr/local/bin/claude-code`, (linkError) => {
-              if (linkError) {
-                console.warn('⚠️ Não foi possível criar symlink, mas executável encontrado');
-              }
-              resolve('claude-code');
-            });
-            return;
-          } catch (e) {
-            // Continue procurando
+        // Usar shell para executar o comando com pipe
+        const child = spawn('bash', ['-c', command], {
+          stdio: ['pipe', 'pipe', 'pipe'],
+          cwd: projectPath,
+          env: {
+            ...process.env,
+            // Variáveis essenciais do claude-wrapper.sh
+            PATH: '/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:' + (process.env.PATH || ''),
+            CLAUDE_SKIP_CONFIRMATION: 'true',
+            CLAUDE_AUTO_CONFIRM: 'yes',
+            CLAUDE_NONINTERACTIVE: '1',
+            CI: 'true',
+            TERM: 'dumb'
           }
-        }
+        });
         
-        console.log('📦 Claude Code não encontrado. Tentando reinstalar...');
+        let stdout = '';
+        let stderr = '';
         
-        // Tentar instalar
-        exec('npm install -g @anthropic-ai/claude-code --unsafe-perm=true --allow-root', {
-          timeout: 60000 // 1 minuto timeout
-        }, (installError, installStdout, installStderr) => {
-          if (installError) {
-            console.error('❌ Erro ao reinstalar Claude Code:', installError.message);
-            console.error('stderr:', installStderr);
-            reject(installError);
-            return;
+        child.stdout?.on('data', (data) => {
+          const output = data.toString();
+          stdout += output;
+          console.log('CLAUDE OUT:', output.trim());
+        });
+        
+        child.stderr?.on('data', (data) => {
+          const output = data.toString();
+          stderr += output;
+          console.log('CLAUDE ERR:', output.trim());
+        });
+        
+        let processFinished = false;
+        
+        child.on('close', (code) => {
+          if (!processFinished) {
+            processFinished = true;
+            console.log(`📊 Claude Code finished with code: ${code}`);
+            resolve({ code, stdout, stderr });
           }
-          
-          console.log('✅ Claude Code reinstalado');
-          
-          // Verificar se funciona agora
-          exec('which claude-code || which claude', (finalError, finalStdout) => {
-            if (finalError) {
-              reject(new Error('Claude Code instalado mas ainda não encontrado no PATH'));
-            } else {
-              const command = finalStdout.trim().includes('claude-code') ? 'claude-code' : 'claude';
-              console.log('✅ Claude disponível como:', command);
-              resolve(command);
-            }
-          });
+        });
+        
+        child.on('error', (error) => {
+          if (!processFinished) {
+            processFinished = true;
+            console.log(`❌ Claude Code error: ${error.message}`);
+            reject({ error: error.message });
+          }
+        });
+        
+        // Timeout
+        const timeoutId = setTimeout(() => {
+          if (!processFinished) {
+            processFinished = true;
+            console.log('⏰ Killing Claude Code due to timeout');
+            child.kill('SIGTERM');
+            resolve({ code: 'TIMEOUT', stdout, stderr });
+          }
+        }, 60000); // 1 minuto
+        
+        // Cancelar timeout se o processo terminar
+        child.on('close', () => {
+          clearTimeout(timeoutId);
         });
       });
-    });
-  });
-}
-
-// Função principal para executar Claude Code
-async function executeClaudeCode(instruction, projectPath, options = {}) {
-  return new Promise(async (resolve, reject) => {
-    const {
-      branch = 'feat/generate-automatic',
-      createBranch = true,
-      createPR = false
-    } = options;
-
-    // Garantir que Claude Code está disponível e descobrir o comando correto
-    let claudeCommand;
-    try {
-      claudeCommand = await ensureClaudeCode();
-    } catch (error) {
-      reject({
-        success: false,
-        error: 'Falha ao garantir que Claude Code está disponível: ' + error.message,
-        suggestion: 'Problema na instalação do Claude Code no container'
-      });
-      return;
-    }
-
-    console.log(`🤖 Usando comando: ${claudeCommand}`);
-    console.log(`📁 Diretório do projeto: ${projectPath}`);
-    console.log(`🌿 Branch: ${branch}`);
-
-    // Verificar se o diretório existe
-    try {
-      await fs.access(projectPath);
-    } catch {
-      reject({
-        success: false,
-        error: `Diretório do projeto não encontrado: ${projectPath}`,
-        suggestion: 'Certifique-se de que o repositório foi clonado corretamente'
-      });
-      return;
-    }
-
-    // Dividir em comandos menores para evitar timeout
-    const commands = [];
-    
-    // 1. Configurar Git
-    commands.push({
-      name: 'git_config',
-      cmd: `cd "${projectPath}" && git config user.email "emingues@gmail.com" && git config user.name "Bot"`,
-      timeout: 10000
-    });
-    
-    // 2. Fetch origin (se for repositório clonado)
-    commands.push({
-      name: 'git_fetch',
-      cmd: `cd "${projectPath}" && git fetch origin || echo "No remote origin"`,
-      timeout: 30000
-    });
-    
-    // 3. Criar/trocar branch
-    if (createBranch) {
-      commands.push({
-        name: 'git_branch',
-        cmd: `cd "${projectPath}" && (git checkout -b ${branch} 2>/dev/null || git checkout ${branch} || git checkout -b ${branch})`,
-        timeout: 15000
-      });
-    }
-    
-    // 4. Executar Claude Code com diagnóstico melhorado
-    commands.push({
-      name: 'claude_test',
-      cmd: `${claudeCommand} --version`,
-      timeout: 15000
-    });
-
-    commands.push({
-      name: 'claude_code',
-      cmd: `cd "${projectPath}" && timeout 180s ${claudeCommand} "${instruction}"`,
-      timeout: 200000 // 3.3 minutos (um pouco mais que o timeout interno)
-    });
-
-    // Executar comandos sequencialmente
-    let results = [];
-    
-    for (const command of commands) {
-      console.log(`⚡ Executando: ${command.name}`);
       
-      try {
-        const result = await new Promise((resolve, reject) => {
-          exec(command.cmd, {
-            timeout: command.timeout,
-            env: {
-              ...process.env,
-              ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
-              PATH: '/usr/local/bin:/usr/bin:/bin',
-              // Debug adicional
-              DEBUG: '1',
-              ANTHROPIC_DEBUG: '1'
-            }
-          }, (error, stdout, stderr) => {
-            if (error) {
-              // Para alguns comandos, erro não é crítico
-              if (command.name === 'git_fetch' && error.code !== 143) {
-                console.warn(`⚠️ ${command.name} failed but continuing:`, error.message);
-                resolve({ stdout: '', stderr: error.message, warning: true });
-                return;
-              }
-              reject(error);
-            } else {
-              resolve({ stdout, stderr, success: true });
-            }
-          });
+      const executionTime = Math.floor((Date.now() - startTime) / 1000);
+      const detailedOutput = `=== Claude Code Execution ===
+Command: ${command}
+Exit Code: ${result.code}
+Execution Time: ${executionTime}s
+=== STDOUT ===
+${result.stdout}
+=== STDERR ===
+${result.stderr}
+`;
+      
+      const success = result.code === 0;
+      
+      if (success) {
+        resolve({
+          success: true,
+          detail: detailedOutput
         });
-        
-        results.push({ 
-          command: command.name, 
-          ...result 
+      } else if (result.code === 0) {
+        resolve({
+          success: false,
+          detail: detailedOutput
         });
-        
-        console.log(`✅ ${command.name} completed`);
-        
-      } catch (error) {
-        console.error(`❌ ${command.name} failed:`, error.message);
-        
-        // Se Claude Code falhou, é erro crítico
-        if (command.name === 'claude_code') {
-          reject({
-            success: false,
-            error: `${command.name} failed: ${error.message}`,
-            stderr: error.stderr || '',
-            results: results,
-            debug: {
-              command: command.cmd.replace(process.env.ANTHROPIC_API_KEY || '', '***'),
-              timeout: command.timeout,
-              code: error.code
-            }
-          });
-          return;
-        }
-        
-        // Para outros comandos, continua com warning
-        results.push({ 
-          command: command.name, 
-          error: error.message, 
-          failed: true 
-        });
-      }
-    }
-    
-    // Sucesso se chegou até aqui
-    const claudeResult = results.find(r => r.command === 'claude_code' && r.success) || 
-                        results.find(r => r.command === 'claude_fallback' && r.success);
-    
-    if (!claudeResult || !claudeResult.success) {
-      reject({
-        success: false,
-        error: 'Nenhum método de execução do Claude Code funcionou',
-        results: results,
-        suggestion: 'Problema grave com conectividade da API ou configuração'
-      });
-      return;
-    }
-    
-    resolve({
-      success: true,
-      stdout: claudeResult.stdout || '',
-      stderr: claudeResult.stderr || '',
-      branch: branch,
-      projectPath: projectPath,
-      claudeCommand: claudeCommand,
-      method_used: claudeResult.command,
-      allResults: results
-    });
-  });
-}
-
-// Função para criar PR via GitHub CLI
-async function createPullRequest(projectPath, branch, title, description) {
-  return new Promise((resolve, reject) => {
-    const command = `cd ${projectPath} && gh pr create --title "${title}" --body "${description}" --head ${branch} --base main`;
-    
-    exec(command, {
-      env: {
-        ...process.env,
-        GH_TOKEN: process.env.GITHUB_TOKEN
-      }
-    }, (error, stdout, stderr) => {
-      if (error) {
-        console.warn('Erro ao criar PR (pode ser normal se PR já existe):', error.message);
-        resolve({ success: false, error: error.message, stderr });
-        return;
-      }
-      resolve({ 
-        success: true, 
-        prUrl: stdout.trim(),
-        message: 'PR criado com sucesso'
-      });
-    });
-  });
-}
-
-// Função para forçar Claude Code CLI com múltiplas estratégias
-async function forceClaudeCodeCLI(instruction, projectPath, options = {}) {
-  return new Promise(async (resolve, reject) => {
-    const {
-      branch = 'feat/generate-automatic',
-      createBranch = true
-    } = options;
-
-    console.log('💪 FORÇANDO uso do Claude Code CLI...');
-    
-    // Detectar comando Claude
-    let claudeCommand;
-    try {
-      claudeCommand = await ensureClaudeCode();
-    } catch (error) {
-      reject({
-        success: false,
-        error: 'Claude Code não disponível: ' + error.message
-      });
-      return;
-    }
-
-    // ESTRATÉGIA 3: Instrução fragmentada
-    console.log('🔧 Estratégia 3: Instrução fragmentada');
-    try {
-      const strategy3 = await executeWithStrategy3(claudeCommand, instruction, projectPath);
-      if (strategy3.success) {
-        console.log('✅ Estratégia 3 FUNCIONOU!');
-        return resolve(strategy3);
-      }
-    } catch (e3) {
-      console.log('❌ Estratégia 3 falhou:', e3.message);
-    }
-
-    // ESTRATÉGIA 4: Processo separado + kill forçado
-    console.log('🔧 Estratégia 4: Processo separado + kill forçado');
-    try {
-      const strategy4 = await executeWithStrategy4(claudeCommand, instruction, projectPath);
-      if (strategy4.success) {
-        console.log('✅ Estratégia 4 FUNCIONOU!');
-        return resolve(strategy4);
-      }
-    } catch (e4) {
-      console.log('❌ Estratégia 4 falhou:', e4.message);
-    }
-
-    // ESTRATÉGIA 5: Reinstalar Claude Code
-    console.log('🔧 Estratégia 5: Reinstalar Claude Code');
-    try {
-      const strategy5 = await executeWithStrategy5(claudeCommand, instruction, projectPath);
-      if (strategy5.success) {
-        console.log('✅ Estratégia 5 FUNCIONOU!');
-        return resolve(strategy5);
-      }
-    } catch (e5) {
-      console.log('❌ Estratégia 5 falhou:', e5.message);
-    }
-
-    // Se todas falharam
-    reject({
-      success: false,
-      error: 'Todas as 5 estratégias de força falharam',
-      strategies_tried: 5,
-      final_message: 'Claude Code CLI é impossível de forçar neste ambiente'
-    });
-  });
-}
-
-// ESTRATÉGIA 1: Timeout muito longo + debug máximo
-async function executeWithStrategy1(claudeCommand, instruction, projectPath) {
-  return new Promise((resolve, reject) => {
-    console.log('⏰ Timeout de 10 minutos + debug máximo');
-    
-    const cmd = `cd "${projectPath}" && ${claudeCommand} "${instruction}"`;
-    
-    exec(cmd, {
-      timeout: 600000, // 10 minutos!!
-      maxBuffer: 50 * 1024 * 1024, // 50MB buffer
-      env: {
-        ...process.env,
-        ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
-        DEBUG: '*',
-        ANTHROPIC_DEBUG: '1',
-        CLAUDE_DEBUG: '1',
-        NODE_DEBUG: '*',
-        VERBOSE: '1'
-      }
-    }, (error, stdout, stderr) => {
-      if (error) {
-        reject({ success: false, error: error.message, code: error.code });
       } else {
-        resolve({ 
-          success: true, 
-          stdout, 
-          stderr, 
-          strategy: '1_long_timeout',
-          timeout_used: '10min'
+        resolve({
+          success: false,
+          detail: detailedOutput
         });
       }
-    });
-  });
-}
-
-// ESTRATÉGIA 2: Reiniciar + limpar cache
-async function executeWithStrategy2(claudeCommand, instruction, projectPath) {
-  return new Promise(async (resolve, reject) => {
-    console.log('🧹 Limpando cache e reiniciando...');
-    
-    // Limpar possíveis caches
-    const cleanupCmds = [
-      'npm cache clean --force',
-      'rm -rf ~/.npm/_cacache',
-      'rm -rf /tmp/claude-*',
-      'killall node || true',
-      'killall claude || true'
-    ];
-    
-    for (const cleanCmd of cleanupCmds) {
-      try {
-        await new Promise((res) => {
-          exec(cleanCmd, { timeout: 10000 }, () => res()); // Ignora erros
-        });
-      } catch (e) {
-        // Ignora erros de limpeza
-      }
-    }
-    
-    // Aguardar um pouco
-    await new Promise(res => setTimeout(res, 2000));
-    
-    // Tentar executar
-    const cmd = `cd "${projectPath}" && stdbuf -oL -eL ${claudeCommand} "${instruction}"`;
-    
-    exec(cmd, {
-      timeout: 180000, // 3 minutos
-      env: {
-        ...process.env,
-        ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
-        PATH: '/usr/local/bin:/usr/bin:/bin'
-      }
-    }, (error, stdout, stderr) => {
-      if (error) {
-        reject({ success: false, error: error.message, code: error.code });
-      } else {
-        resolve({ 
-          success: true, 
-          stdout, 
-          stderr, 
-          strategy: '2_restart_cleanup'
-        });
-      }
-    });
-  });
-}
-
-// ESTRATÉGIA 3: Instrução fragmentada
-async function executeWithStrategy3(claudeCommand, instruction, projectPath) {
-  return new Promise(async (resolve, reject) => {
-    console.log('✂️ Fragmentando instrução...');
-    
-    // Quebrar instrução em partes menores
-    const fragments = instruction.length > 50 
-      ? [instruction.substring(0, 50), instruction.substring(50)]
-      : [instruction];
-    
-    let allResults = [];
-    
-    for (let i = 0; i < fragments.length; i++) {
-      const fragment = fragments[i];
-      const isLast = i === fragments.length - 1;
       
-      console.log(`📝 Fragmento ${i + 1}/${fragments.length}: ${fragment}`);
-      
-      const cmd = `cd "${projectPath}" && echo "${fragment}" | ${claudeCommand} --stdin`;
-      
-      try {
-        const result = await new Promise((resolve, reject) => {
-          exec(cmd, {
-            timeout: 90000, // 1.5 minutos por fragmento
-            env: {
-              ...process.env,
-              ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY
-            }
-          }, (error, stdout, stderr) => {
-            if (error) {
-              reject(error);
-            } else {
-              resolve({ stdout, stderr });
-            }
-          });
-        });
-        
-        allResults.push(result);
-        
-        if (isLast) {
-          resolve({
-            success: true,
-            stdout: allResults.map(r => r.stdout).join('\n'),
-            stderr: allResults.map(r => r.stderr).join('\n'),
-            strategy: '3_fragmented',
-            fragments_used: fragments.length
-          });
-          return;
-        }
-        
-      } catch (fragmentError) {
-        if (isLast && allResults.length > 0) {
-          // Se último fragmento falhou mas temos resultados anteriores
-          resolve({
-            success: true,
-            stdout: allResults.map(r => r.stdout).join('\n'),
-            stderr: `Partial success: ${allResults.length}/${fragments.length} fragments`,
-            strategy: '3_fragmented_partial'
-          });
-          return;
-        }
-        reject({ success: false, error: fragmentError.message });
-        return;
-      }
+    } catch (setupError) {
+      reject({
+        success: false,
+        command: command,
+        error: 'Setup failed: ' + setupError.message,
+      });
     }
   });
 }
 
-// ESTRATÉGIA 4: Processo separado + kill forçado
-async function executeWithStrategy4(claudeCommand, instruction, projectPath) {
-  return new Promise((resolve, reject) => {
-    console.log('⚡ Processo separado + kill automático');
-    
-    const cmd = `cd "${projectPath}" && timeout --preserve-status 120s ${claudeCommand} "${instruction}"`;
-    
-    const child = exec(cmd, {
-      env: {
-        ...process.env,
-        ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY
-      }
-    }, (error, stdout, stderr) => {
-      if (error && error.code !== 143) { // 143 é timeout, que esperamos
-        reject({ success: false, error: error.message, code: error.code });
-      } else {
-        resolve({ 
-          success: true, 
-          stdout: stdout || 'Process completed (may have been killed)',
-          stderr, 
-          strategy: '4_separate_process',
-          was_killed: error?.code === 143
-        });
-      }
-    });
-    
-    // Kill forçado após 2 minutos
-    setTimeout(() => {
-      if (child.pid) {
-        console.log('💀 Matando processo forçadamente...');
-        try {
-          process.kill(child.pid, 'SIGKILL');
-        } catch (e) {
-          console.log('Processo já morto ou não existe');
-        }
-      }
-    }, 120000);
-  });
-}
+async function initializeLocalGit(projectPath) {
+  const gitCommands = [
+    `cd "${projectPath}" && git init`,
+    `cd "${projectPath}" && git config user.email "claude-v2@webhook.com"`,
+    `cd "${projectPath}" && git config user.name "Bot"`,
+    `cd "${projectPath}" && echo "# Projeto Claude Code V2" > README.md`,
+    `cd "${projectPath}" && git add README.md`,
+    `cd "${projectPath}" && git commit -m "Initial commit"`
+  ];
 
-// ESTRATÉGIA 5: Reinstalar Claude Code
-async function executeWithStrategy5(claudeCommand, instruction, projectPath) {
-  return new Promise(async (resolve, reject) => {
-    console.log('🔄 Reinstalando Claude Code...');
-    
-    // Remover instalação atual
+  for (const cmd of gitCommands) {
     try {
-      await new Promise((res) => {
-        exec('npm uninstall -g @anthropic-ai/claude-code', { timeout: 30000 }, () => res());
+      await new Promise((resolve) => {
+        exec(cmd, { timeout: 10000 }, () => resolve());
       });
     } catch (e) {
-      console.log('Remoção falhou, continuando...');
+      console.warn('Git init command failed:', cmd);
+    }
+  }
+}
+
+async function createBranchAsync(projectPath, origin = 'main', branch) {
+  try {
+    console.log(`🌿 Criando branch ${branch} a partir de ${origin}...`);
+    
+    // Comandos sequenciais para garantir a criação correta da branch
+    const commands = [
+      // 1. Verificar se estamos em um repositório git
+      `cd "${projectPath}" && git status`,
+      
+      // 2. Buscar atualizações do remote se existir
+      `cd "${projectPath}" && (git fetch origin 2>/dev/null || echo "No remote to fetch")`,
+      
+      // 3. Verificar se a branch origin existe localmente
+      `cd "${projectPath}" && git show-ref --verify --quiet refs/heads/${origin}`,
+      
+      // 4. Se origin não existe localmente, verificar se existe no remote
+      `cd "${projectPath}" && (git show-ref --verify --quiet refs/remotes/origin/${origin} && git checkout -b ${origin} origin/${origin} || echo "Origin branch not found in remote")`,
+      
+      // 5. Se origin ainda não existe, criar a partir de main
+      `cd "${projectPath}" && (git show-ref --verify --quiet refs/heads/${origin} || (git checkout main 2>/dev/null && git checkout -b ${origin} && git push -u origin ${origin} 2>/dev/null || echo "Created origin branch locally"))`,
+      
+      // 6. Fazer checkout da origin
+      `cd "${projectPath}" && git checkout ${origin}`,
+      
+      // 7. Criar a nova branch a partir da origin
+      `cd "${projectPath}" && (git checkout -b ${branch} 2>/dev/null || git checkout ${branch})`,
+      
+      // 8. Push da nova branch para o remote se existir
+      `cd "${projectPath}" && (git push -u origin ${branch} 2>/dev/null || echo "No remote to push to")`
+    ];
+    
+    for (const cmd of commands) {
+      await new Promise((resolve) => {
+        exec(cmd, { timeout: 15000 }, (error, stdout, stderr) => {
+          if (error && !cmd.includes('||')) {
+            console.warn(`⚠️ Command failed: ${cmd.split('&&').pop()?.trim()}`);
+            console.warn(`Error: ${error.message}`);
+          } else {
+            console.log(`✅ Command completed: ${cmd.split('&&').pop()?.trim()}`);
+            if (stdout && stdout.trim()) {
+              console.log(`Output: ${stdout.trim()}`);
+            }
+          }
+          resolve();
+        });
+      });
     }
     
-    // Reinstalar
+    console.log(`✅ Branch ${branch} criada com sucesso a partir de ${origin}`);
+    
+  } catch (e) {
+    console.warn('Branch setup failed:', e.message);
+    
+    // Fallback: criar branch simples se tudo falhar
     try {
-      await new Promise((resolve, reject) => {
-        exec('npm install -g @anthropic-ai/claude-code --unsafe-perm=true --allow-root --force', {
-          timeout: 120000 // 2 minutos para reinstalar
-        }, (error, stdout, stderr) => {
+      await new Promise((resolve) => {
+        const fallbackCmd = `cd "${projectPath}" && git checkout -b ${branch}`;
+        exec(fallbackCmd, { timeout: 10000 }, () => {
+          console.log(`⚠️ Fallback: Branch ${branch} criada diretamente`);
+          resolve();
+        });
+      });
+    } catch (fallbackError) {
+      console.warn('Branch creation completely failed:', fallbackError.message);
+    }
+  }
+}
+
+async function commitChanges(projectPath, instruction, branch = 'main') {
+  try {
+    const commitMessage = `feat: ${instruction.substring(0, 72)}${instruction.length > 72 ? '...' : ''}\n\nGenerated by: Claude Code`;
+    
+    // Comandos sequenciais para garantir que tudo está configurado
+    const commands = [
+      // Garantir que estamos no branch correto
+      `cd "${projectPath}" && git checkout ${branch} 2>/dev/null || git checkout -b ${branch}`,
+      // Adicionar arquivos
+      `cd "${projectPath}" && git add .`,
+      // Fazer commit
+      `cd "${projectPath}" && git commit -m "${commitMessage}" || echo "No changes to commit"`,
+      // Push do branch se há remote
+      `cd "${projectPath}" && (git remote get-url origin >/dev/null 2>&1 && git push -u origin ${branch} || echo "No remote configured")`
+    ];
+    
+    for (const cmd of commands) {
+      await new Promise((resolve) => {
+        exec(cmd, { timeout: 30000 }, (error, stdout, stderr) => {
           if (error) {
-            reject(error);
+            console.warn(`⚠️ Command failed: ${cmd.split('&&').pop()?.trim()}`);
+            console.warn(`Error: ${error.message}`);
           } else {
-            console.log('✅ Claude Code reinstalado');
-            resolve(stdout);
+            console.log(`✅ Command completed: ${cmd.split('&&').pop()?.trim()}`);
+          }
+          resolve();
+        });
+      });
+    }
+  } catch (e) {
+    console.warn('Commit process failed:', e.message);
+  }
+}
+
+async function createPullRequest(projectPath, origin = 'main', branch, title, description) {
+  return new Promise(async (resolve, reject) => {
+    try {
+      // Primeiro verificar se há commits no branch
+      const checkCommitsCmd = `cd "${projectPath}" && git rev-list --count ${branch}`;
+      
+      const commitCount = await new Promise((res) => {
+        exec(checkCommitsCmd, { timeout: 10000 }, (error, stdout) => {
+          if (error) {
+            console.warn('Could not count commits, proceeding anyway');
+            res('1'); 
+          } else {
+            res(stdout.trim());
           }
         });
       });
-    } catch (reinstallError) {
-      reject({ success: false, error: 'Falha na reinstalação: ' + reinstallError.message });
-      return;
-    }
-    
-    // Tentar executar com versão reinstalada
-    const newCommand = await ensureClaudeCode();
-    const cmd = `cd "${projectPath}" && ${newCommand} "${instruction}"`;
-    
-    exec(cmd, {
-      timeout: 180000, // 3 minutos
-      env: {
-        ...process.env,
-        ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY
-      }
-    }, (error, stdout, stderr) => {
-      if (error) {
-        reject({ success: false, error: error.message, code: error.code });
-      } else {
-        resolve({ 
-          success: true, 
-          stdout, 
-          stderr, 
-          strategy: '5_reinstall',
-          reinstalled: true
+      
+      if (commitCount === '0') {
+        resolve({
+          success: false,
+          error: 'No commits found in branch',
+          suggestion: 'Make sure changes were committed before creating PR'
         });
+        return;
       }
-    });
+      
+      // Verificar se o remote existe
+      const checkRemoteCmd = `cd "${projectPath}" && git remote get-url origin`;
+      
+      const hasRemote = await new Promise((res) => {
+        exec(checkRemoteCmd, { timeout: 10000 }, (error, stdout) => {
+          if (error) {
+            console.warn('No remote origin configured');
+            res(false);
+          } else {
+            console.log('Remote origin found:', stdout.trim());
+            res(true);
+          }
+        });
+      });
+      
+      if (!hasRemote) {
+        resolve({
+          success: false,
+          error: 'No remote repository configured',
+          suggestion: 'Cannot create PR without a remote repository'
+        });
+        return;
+      }
+      
+      // Verificar diferenças entre branches
+      const diffCmd = `cd "${projectPath}" && git diff --name-only ${origin}..${branch}`;
+      
+      const changedFiles = await new Promise((res) => {
+        exec(diffCmd, { timeout: 10000 }, (error, stdout) => {
+          if (error) {
+            console.warn('Could not check diff, proceeding anyway');
+            res(['unknown']);
+          } else {
+            res(stdout.trim().split('\n').filter(f => f.length > 0));
+          }
+        });
+      });
+      
+      if (changedFiles.length === 0) {
+        resolve({
+          success: false,
+          error: `No differences found between ${origin} and ${branch}`,
+          suggestion: 'Make sure changes were committed and pushed'
+        });
+        return;
+      }
+           
+      // Criar PR
+      const prCmd = `cd "${projectPath}" && gh pr create --title "${title}" --body "${description}" --head ${branch} --base ${origin}`;
+      
+      exec(prCmd, {
+        timeout: 30000,
+        env: {
+          ...process.env,
+          GH_TOKEN: process.env.GITHUB_TOKEN
+        }
+      }, (error, stdout, stderr) => {
+        if (error) {
+          resolve({
+            success: false,
+            error: error.message,
+            stderr: stderr,
+            debug: {
+              commitCount,
+              hasRemote,
+              changedFiles
+            }
+          });
+        } else {
+          resolve({
+            success: true,
+            prUrl: stdout.trim(),
+            message: 'PR criado com sucesso',
+            changedFiles: changedFiles
+          });
+        }
+      });
+      
+    } catch (setupError) {
+      resolve({
+        success: false,
+        error: 'PR setup failed: ' + setupError.message
+      });
+    }
   });
 }
 
-// Endpoint principal
 app.post('/execute-claude', async (req, res) => {
   try {
     const {
       instruction,
       repoUrl,
       projectName,
-      branch = 'feat/generate-automatic',
-      createBranch = true,
-      createPR = false,
+      branch = 'feat/claude-auto-generate',
+      origin = 'main',
+      createPR = true,
       prTitle,
       prDescription,
       webhook_secret
@@ -670,171 +447,72 @@ app.post('/execute-claude', async (req, res) => {
 
     // Determinar caminho do projeto
     const projectPath = projectName 
-      ? `/tmp/projects/${projectName}`
-      : `/tmp/projects/default-project`;
+      ? `/tmp/projects/${projectName}-v2`
+      : `/tmp/projects/claude-v2-project`;
 
-    console.log(`Iniciando execução Claude Code para: ${instruction}`);
-    console.log(`Projeto: ${projectPath}`);
-    console.log(`Repository: ${repoUrl}`);
+    console.log(`🚀 Claude Code V2 - Nova implementação`);
+    console.log(`📝 Instrução: ${instruction}`);
+    console.log(`📁 Projeto: ${projectPath}`);
 
-    // Clonar repositório se fornecido
+    // Preparar repositório se fornecido
     if (repoUrl) {
       try {
         await ensureRepository(repoUrl, projectPath);
-      } catch (cloneError) {
-        console.warn('Erro ao clonar repositório:', cloneError.message);
-        // Continua mesmo se falhar o clone
+      } catch (repoError) {
+        return res.status(400).json({
+          success: false,
+          error: 'Erro ao preparar repositório: ' + repoError.message
+        });
       }
+    } else {
+      // Criar diretório local
+      await fs.mkdir(projectPath, { recursive: true });
+      await initializeLocalGit(projectPath);
     }
 
-    // Executar Claude Code
-    const result = await forceClaudeCodeCLI(instruction, projectPath, {
-      branch,
-      createBranch,
-      createPR
-    });
-
+    await createBranchAsync(projectPath, origin, branch);
+    const result = await executeClaudeCode(instruction, projectPath);
     let prResult = null;
 
-    // Criar PR se solicitado e executou com sucesso
-    if (createPR && result.success && process.env.GITHUB_TOKEN) {
-      try {
-        prResult = await createPullRequest(
-          projectPath, 
-          branch, 
-          prTitle || `feat: ${instruction}`,
-          prDescription || `Implementação automática via Railway Claude Webhook:\n\n${instruction}`
-        );
-      } catch (prError) {
-        console.warn('Erro ao criar PR:', prError);
-        prResult = { success: false, error: prError.message };
+    if (result.success) {
+      await commitChanges(projectPath, instruction, branch);
+
+      if (createPR && process.env.GITHUB_TOKEN && repoUrl) {
+        try {
+          prResult = await createPullRequest(
+            projectPath,
+            origin,
+            branch,
+            prTitle || `feat: ${instruction.substring(0, 50)}...`,
+            prDescription || `Implementação via Claude Code:\n\n${instruction}}`
+          );
+        } catch (prError) {
+          console.warn('Erro ao criar PR:', prError);
+          prResult = { success: false, error: prError.message };
+        }
       }
     }
 
-    // Resposta de sucesso
     res.json({
       success: true,
-      message: 'Claude Code executado com sucesso via Railway!',
       result: {
         claudeCode: result,
         pullRequest: prResult,
         branch: branch,
         projectPath: projectPath,
-        railway: {
-          service: process.env.RAILWAY_SERVICE_NAME || 'claude-webhook',
-          environment: process.env.RAILWAY_ENVIRONMENT || 'production'
-        }
-      }
-    });
-
-  } catch (error) {
-    console.error('Erro no webhook:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message || 'Erro interno do servidor',
-      railway: {
-        service: process.env.RAILWAY_SERVICE_NAME,
         timestamp: new Date().toISOString()
+      },
+      summary: {
+        instruction: instruction,
+        pr_created: !!prResult?.success
       }
-    });
-  }
-});
-
-// Endpoint para testar conectividade com API Anthropic
-app.post('/test-api', async (req, res) => {
-  try {
-    if (!process.env.ANTHROPIC_API_KEY) {
-      return res.json({
-        success: false,
-        error: 'ANTHROPIC_API_KEY não configurada'
-      });
-    }
-
-    console.log('🧪 Testando conectividade com API Anthropic...');
-
-    // Teste direto com curl para API Anthropic
-    const apiTest = await new Promise((resolve) => {
-      const testCmd = `curl -s -w "HTTPSTATUS:%{http_code}" -X POST "https://api.anthropic.com/v1/messages" \
-        -H "Content-Type: application/json" \
-        -H "x-api-key: ${process.env.ANTHROPIC_API_KEY}" \
-        -H "anthropic-version: 2023-06-01" \
-        -d '{"model": "claude-3-haiku-20240307", "max_tokens": 10, "messages": [{"role": "user", "content": "hi"}]}' \
-        --connect-timeout 10 --max-time 30`;
-
-      exec(testCmd, (error, stdout, stderr) => {
-        if (error) {
-          resolve({
-            success: false,
-            error: error.message,
-            stderr: stderr
-          });
-        } else {
-          // Separar response do HTTP status
-          const parts = stdout.split('HTTPSTATUS:');
-          const response = parts[0];
-          const httpStatus = parts[1];
-
-          resolve({
-            success: true,
-            http_status: httpStatus,
-            response: response,
-            api_accessible: httpStatus === '200'
-          });
-        }
-      });
-    });
-
-    // Teste com Claude Code para ver logs detalhados
-    const claudeCommand = await ensureClaudeCode().catch(e => 'claude');
-    
-    const claudeTest = await new Promise((resolve) => {
-      const testDir = `/tmp/api-test-${Date.now()}`;
-      exec(`mkdir -p ${testDir}`, () => {
-        exec(`cd ${testDir} && timeout 45s ${claudeCommand} "create a simple hello.txt file" --verbose`, {
-          env: {
-            ...process.env,
-            ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
-            ANTHROPIC_DEBUG: '1',
-            DEBUG: '1'
-          }
-        }, (error, stdout, stderr) => {
-          // Cleanup
-          exec(`rm -rf ${testDir}`);
-          
-          resolve({
-            success: !error,
-            stdout: stdout || '',
-            stderr: stderr || '',
-            error: error ? error.message : null,
-            code: error ? error.code : null
-          });
-        });
-      });
-    });
-
-    res.json({
-      success: apiTest.api_accessible && claudeTest.success,
-      tests: {
-        direct_api: apiTest,
-        claude_code: claudeTest
-      },
-      api_key_info: {
-        configured: true,
-        length: process.env.ANTHROPIC_API_KEY.length,
-        prefix: process.env.ANTHROPIC_API_KEY.substring(0, 10) + '...'
-      },
-      recommendations: apiTest.api_accessible ? 
-        (claudeTest.success ? 
-          ['Tudo OK! API acessível e Claude Code funcionando'] :
-          ['API OK mas Claude Code com problema - verifique logs']
-        ) : 
-        ['API Anthropic inacessível - verifique API key ou conectividade']
     });
 
   } catch (error) {
+    console.error('Erro no Claude Code', error);
     res.status(500).json({
       success: false,
-      error: error.message
+      error: error.message || 'Erro interno do servidor'
     });
   }
 });
@@ -855,8 +533,6 @@ app.get('/debug', async (req, res) => {
       cwd: process.cwd(),
       memory: process.memoryUsage(),
       env_vars: {
-        has_anthropic_key: !!process.env.ANTHROPIC_API_KEY,
-        anthropic_key_length: process.env.ANTHROPIC_API_KEY ? process.env.ANTHROPIC_API_KEY.length : 0,
         has_github_token: !!process.env.GITHUB_TOKEN,
         github_token_length: process.env.GITHUB_TOKEN ? process.env.GITHUB_TOKEN.length : 0,
         has_webhook_secret: !!process.env.WEBHOOK_SECRET,
@@ -1094,21 +770,7 @@ app.get('/debug', async (req, res) => {
       action: 'Pronto para uso!'
     });
   }
-  
-  if (!diagnostics.environment.env_vars.has_anthropic_key) {
-    diagnostics.recommendations.push({
-      type: 'error',
-      message: 'ANTHROPIC_API_KEY não configurada',
-      action: 'Configurar a variável de ambiente ANTHROPIC_API_KEY no Railway'
-    });
-  } else if (diagnostics.environment.env_vars.anthropic_key_length < 100) {
-    diagnostics.recommendations.push({
-      type: 'warning',
-      message: 'ANTHROPIC_API_KEY parece ser muito curta',
-      action: 'Verificar se a API key está completa'
-    });
-  }
-  
+    
   if (!diagnostics.environment.env_vars.has_webhook_secret) {
     diagnostics.recommendations.push({
       type: 'warning',
@@ -1143,43 +805,12 @@ app.get('/debug', async (req, res) => {
   // Status geral
   diagnostics.overall_status = {
     claude_ready: claudeFound,
-    api_key_configured: !!process.env.ANTHROPIC_API_KEY,
     git_configured: diagnostics.installations.git?.status === 'installed',
-    webhook_ready: claudeFound && !!process.env.ANTHROPIC_API_KEY,
+    webhook_ready: claudeFound,
     pr_ready: diagnostics.installations.github_cli?.status === 'installed' && !!process.env.GITHUB_TOKEN
   };
 
   res.json(diagnostics);
-});
-
-// Endpoint para listar projetos ativos
-app.get('/projects', async (req, res) => {
-  try {
-    const projectsDir = '/tmp/projects';
-    const projects = await fs.readdir(projectsDir).catch(() => []);
-    
-    const projectInfo = await Promise.all(projects.map(async (project) => {
-      const projectPath = path.join(projectsDir, project);
-      try {
-        const stats = await fs.stat(projectPath);
-        return {
-          name: project,
-          path: projectPath,
-          lastModified: stats.mtime,
-          isDirectory: stats.isDirectory()
-        };
-      } catch {
-        return null;
-      }
-    }));
-
-    res.json({
-      projects: projectInfo.filter(Boolean),
-      total: projectInfo.filter(Boolean).length
-    });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
 });
 
 // Middleware de erro global

@@ -1,0 +1,20 @@
+#!/usr/bin/expect -f
+
+set timeout 120
+set project_path [lindex $argv 0]
+set instruction [lindex $argv 1]
+
+# Executar com variáveis de ambiente que suprimem prompts
+spawn bash -c "cd '$project_path' && CLAUDE_SKIP_CONFIRMATION=true CLAUDE_AUTO_CONFIRM=yes CLAUDE_NONINTERACTIVE=1 CI=true TERM=dumb claude --dangerously-skip-permissions '$instruction'"
+
+# Aguardar término do processo
+expect {
+    eof {
+        catch wait result
+        exit [lindex $result 3]
+    }
+    timeout {
+        puts "Command timed out"
+        exit 1
+    }
+}
